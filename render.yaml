@@ -1,0 +1,18 @@
+# Render Blueprint: fake Signicat headless BankID API (state in memory, so one instance only).
+# Render sets PORT and RENDER_EXTERNAL_URL (used as the QR / approve page URL).
+services:
+  - type: web
+    name: fake-signicat
+    runtime: docker
+    plan: free # spins down after 15 min idle; the first auth call after that waits ~1 min and pending logins are lost
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    numInstances: 1
+    envVars:
+      - key: CLIENT_SECRET # auth's signicat.api_client_secret
+        generateValue: true
+      - key: UI_PASSWORD # basic auth on the approve page, any user name
+        sync: false
+      - key: AUTO_APPROVE # e.g. anna: every login signs in as that user
+        sync: false

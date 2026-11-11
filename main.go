@@ -8,13 +8,21 @@
 // (or scan the QR: it's a link to the approve page; set PUBLIC_URL=http://<your LAN IP>:8099 for a phone).
 // curl:   curl -XPOST 'localhost:8099/fake/approve?user=anna'   approves the newest pending login
 //
-// Env: ADDR (default :8099), PUBLIC_URL (default http://localhost:8099),
-// AUTO_APPROVE=<user key> approves every new login as that user on its first poll.
+// Env: PORT or ADDR (default :8099), PUBLIC_URL (default RENDER_EXTERNAL_URL, else http://localhost:8099),
+// AUTO_APPROVE=<user key> approves every new login as that user on its first poll,
+// CLIENT_SECRET (optional) required as the client secret on the token endpoint, its token then on every API call,
+// UI_PASSWORD (optional) basic auth (any user name) on the approve page and the /fake routes.
+//
+// Render: Docker web service from this directory (Dockerfile, render.yaml), health check /healthz,
+// one instance only (state is in memory). Auth: "api_base_url": "https://<service>.onrender.com",
+// "api_client_secret": the CLIENT_SECRET value.
 package main
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -85,46 +93,101 @@ type session struct {
 }
 
 type server struct {
-	mu          sync.Mutex
-	sessions    map[string]*session
-	publicURL   string
-	autoApprove string
+	mu           sync.Mutex
+	sessions     map[string]*session
+	publicURL    string
+	autoApprove  string
+	clientSecret string
+	accessToken  string
+	uiPassword   string
 }
 
 func main() {
 	addr := env("ADDR", ":8099")
+	if port := os.Getenv("PORT"); port != "" {
+		addr = ":" + port
+	}
 	s := &server{
-		sessions:    map[string]*session{},
-		publicURL:   strings.TrimRight(env("PUBLIC_URL", "http://localhost:8099"), "/"),
-		autoApprove: os.Getenv("AUTO_APPROVE"),
+		sessions:     map[string]*session{},
+		publicURL:    strings.TrimRight(env("PUBLIC_URL", env("RENDER_EXTERNAL_URL", "http://localhost:8099")), "/"),
+		autoApprove:  os.Getenv("AUTO_APPROVE"),
+		clientSecret: os.Getenv("CLIENT_SECRET"),
+		accessToken:  "fake-token",
+		uiPassword:   os.Getenv("UI_PASSWORD"),
 	}
 	if s.autoApprove != "" && findUser(s.autoApprove) == nil {
 		log.Fatalf("AUTO_APPROVE=%q: no such preset user", s.autoApprove)
+	}
+	if s.clientSecret != "" {
+		// stable across restarts, so auth's cached token survives a redeploy or a free-plan spin-down
+		mac := hmac.New(sha256.New, []byte(s.clientSecret))
+		mac.Write([]byte("access-token"))
+		s.accessToken = hex.EncodeToString(mac.Sum(nil))
 	}
 
 	mux := http.NewServeMux()
 	// the Signicat API auth calls
 	mux.HandleFunc("POST /auth/open/connect/token", s.token)
-	mux.HandleFunc("POST /auth/rest/sessions", s.create)
-	mux.HandleFunc("GET /auth/rest/sessions/{id}", s.get)
-	mux.HandleFunc("POST /auth/rest/sessions/{id}/cancel", s.cancel)
+	mux.Handle("POST /auth/rest/sessions", s.api(s.create))
+	mux.Handle("GET /auth/rest/sessions/{id}", s.api(s.get))
+	mux.Handle("POST /auth/rest/sessions/{id}/cancel", s.api(s.cancel))
 	// the fake "BankID app"
-	mux.HandleFunc("GET /{$}", s.page)
-	mux.HandleFunc("GET /approve/{id}", s.page)
-	mux.HandleFunc("POST /fake/sessions/{id}/approve", s.approve)
-	mux.HandleFunc("POST /fake/sessions/{id}/reject", s.reject)
-	mux.HandleFunc("POST /fake/approve", s.approve) // newest pending session
+	mux.Handle("GET /{$}", s.ui(s.page))
+	mux.Handle("GET /approve/{id}", s.ui(s.page))
+	mux.Handle("POST /fake/sessions/{id}/approve", s.ui(s.approve))
+	mux.Handle("POST /fake/sessions/{id}/reject", s.ui(s.reject))
+	mux.Handle("POST /fake/approve", s.ui(s.approve)) // newest pending session
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
 
-	log.Printf("fake signicat on %s (approve page %s)", addr, s.publicURL)
+	log.Printf("fake signicat on %s (approve page %s, client secret %t, ui password %t)",
+		addr, s.publicURL, s.clientSecret != "", s.uiPassword != "")
 	for _, u := range presetUsers {
 		log.Printf("  user %-6s %s %s  %s", u.Key, u.FirstName, u.LastName, u.Nin)
 	}
 	log.Fatal(http.ListenAndServe(addr, logged(mux)))
 }
 
-func (s *server) token(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, map[string]any{"access_token": "fake-token", "token_type": "Bearer", "expires_in": 3600})
+// token accepts the client secret as basic auth or as a form field (x/oauth2 tries both).
+func (s *server) token(w http.ResponseWriter, r *http.Request) {
+	if s.clientSecret != "" {
+		_, secret, ok := r.BasicAuth()
+		if !ok {
+			secret = r.PostFormValue("client_secret")
+		}
+		if !equal(secret, s.clientSecret) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"invalid_client"}`))
+			return
+		}
+	}
+	writeJSON(w, map[string]any{"access_token": s.accessToken, "token_type": "Bearer", "expires_in": 3600})
 }
+
+func (s *server) api(h http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.clientSecret != "" && !equal(r.Header.Get("Authorization"), "Bearer "+s.accessToken) {
+			http.Error(w, `{"title":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		h(w, r)
+	})
+}
+
+func (s *server) ui(h http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.uiPassword != "" {
+			if _, pw, ok := r.BasicAuth(); !ok || !equal(pw, s.uiPassword) {
+				w.Header().Set("WWW-Authenticate", `Basic realm="Fake BankID"`)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+		h(w, r)
+	})
+}
+
+func equal(a, b string) bool { return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1 }
 
 func (s *server) create(w http.ResponseWriter, r *http.Request) {
 	var in struct {
@@ -309,8 +372,8 @@ func writeJSON(w http.ResponseWriter, v any) {
 
 func logged(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/auth/rest/sessions/") && r.Method == http.MethodGet {
-			h.ServeHTTP(w, r) // polled every second: too noisy to log
+		if r.Method == http.MethodGet && (strings.HasPrefix(r.URL.Path, "/auth/rest/sessions/") || r.URL.Path == "/healthz") {
+			h.ServeHTTP(w, r) // polled every second / health checks: too noisy to log
 			return
 		}
 		log.Printf("%s %s", r.Method, r.URL.Path)
