@@ -47,6 +47,21 @@ var presetUsers = []fakeUser{
 	{"maria", "Maria", "Karlsson", pnr("19920320", "662")},
 	{"lars", "Lars", "Nilsson", pnr("19781111", "891")},
 	{"sara", "Sara", "Eriksson", pnr("20000229", "124")},
+	{"johan", "Johan", "Lindberg", pnr("19880312", "315")},
+	{"emma", "Emma", "Svensson", pnr("19950707", "426")},
+	{"karl", "Karl", "Gustafsson", pnr("19790924", "513")},
+	{"elin", "Elin", "Persson", pnr("19930118", "642")},
+	{"oskar", "Oskar", "Olsson", pnr("19970503", "731")},
+	{"linnea", "Linnea", "Larsson", pnr("19990830", "864")},
+	{"anders", "Anders", "Berg", pnr("19720214", "159")},
+	{"ida", "Ida", "Lindqvist", pnr("19960411", "282")},
+	{"nils", "Nils", "Holm", pnr("19830927", "377")},
+	{"frida", "Frida", "Bergström", pnr("19911205", "448")},
+	{"mattias", "Mattias", "Ström", pnr("19860621", "595")},
+	{"klara", "Klara", "Sandberg", pnr("20010316", "626")},
+	{"viktor", "Viktor", "Engström", pnr("19940109", "713")},
+	{"hanna", "Hanna", "Sjöberg", pnr("19890525", "844")},
+	{"gustav", "Gustav", "Axelsson", pnr("20030802", "971")},
 }
 
 // pnr builds a 12-digit personnummer with a valid Luhn check digit.
